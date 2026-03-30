@@ -1,0 +1,30 @@
+# --- Build & Distribution ---
+build/
+dist/
+*.egg-info/
+chunkflow.egg-info/
+
+# --- Compiled C++ Extensions ---
+# Specifically targets the .pyd (Windows) and .so (Linux/macOS) binaries
+*.pyd
+*.so
+# Also ignore the DLLs being copied into your src directory
+*.dll
+
+# --- Python Environment & Cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# --- Database & Logs ---
+# Ignores SQLite database files and their temporary journal files
+*.db
+*.db-shm
+*.db-wal
+run.log
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
