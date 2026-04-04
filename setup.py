@@ -39,7 +39,7 @@ if sys.platform == "win32":
         "-static-libstdc++",
     ]
     # SQLite3: MinGW ships it; point to it explicitly if needed
-    libraries  = ["sqlite3"]
+    libraries  = []
     lib_dirs   = []
 
 elif sys.platform == "darwin":
@@ -49,14 +49,14 @@ elif sys.platform == "darwin":
         "-Xpreprocessor", "-fopenmp",
     ]
     link_args  = ["-lomp"]
-    libraries  = ["sqlite3"]
+    libraries  = []
     lib_dirs   = []
 
 else:
     # Linux / GCC
     compile_args = ["-O3", "-std=c++17", "-fopenmp"]
     link_args    = ["-fopenmp"]
-    libraries    = ["sqlite3"]
+    libraries    = []
     lib_dirs     = []
 
 # ── extension definition ───────────────────────────────────────────────────
@@ -77,7 +77,7 @@ ext = Extension(
 setup(
     name="chunkflow",
     version="0.1.0",
-    description="Parallel chunked dataset processing via C++/OpenMP with SQLite output",
+    description="CSV row split/join and column math; optional SQLite chunking in chunkflow.chunking",
     long_description=Path("README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
     python_requires=">=3.9",

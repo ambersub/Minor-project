@@ -32,7 +32,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from chunkflow import ChunkProcessor
+from chunkflow.chunking import ChunkProcessor
 
 
 DATE_COL = "Project Start and Expiration date"

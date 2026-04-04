@@ -122,6 +122,13 @@ def _format_double_cell(v: float) -> str:
     return format(v, ".17g")
 
 
+def _require_at_least_two_columns(fields: list[str]) -> None:
+    if len(fields) < 2:
+        raise ValueError(
+            "CSV only: each row must parse to at least two comma-separated columns"
+        )
+
+
 def apply_csv_row_math_binary(
     row: str,
     operation: str,
@@ -133,6 +140,7 @@ def apply_csv_row_math_binary(
         raise ValueError("column indices must be non-negative")
 
     fields = split_csv_row(row)
+    _require_at_least_two_columns(fields)
     if col_left >= len(fields) or col_right >= len(fields):
         raise ValueError("column index out of range for CSV row")
 
@@ -164,6 +172,7 @@ def apply_csv_row_math_scalar(
         raise ValueError("column indices must be non-negative")
 
     fields = split_csv_row(row)
+    _require_at_least_two_columns(fields)
     if col >= len(fields):
         raise ValueError("column index out of range for CSV row")
 
@@ -194,6 +203,7 @@ def apply_csv_rows_math_binary(
     out: list[str] = []
     for i, row in enumerate(rows):
         if skip_header and i == 0:
+            _require_at_least_two_columns(split_csv_row(row))
             out.append(row)
         else:
             out.append(
@@ -215,6 +225,7 @@ def apply_csv_rows_math_scalar(
     out: list[str] = []
     for i, row in enumerate(rows):
         if skip_header and i == 0:
+            _require_at_least_two_columns(split_csv_row(row))
             out.append(row)
         else:
             out.append(

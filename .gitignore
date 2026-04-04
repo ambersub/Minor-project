@@ -24,6 +24,7 @@ venv/
 *.db-shm
 *.db-wal
 run.log
+output.csv
 
 # --- OS Specific ---
 .DS_Store

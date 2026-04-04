@@ -7,22 +7,18 @@
  *   - Accept a flat list of Python string records from pybind11
  *   - Split them into fixed-size chunks
  *   - Process each chunk in parallel via OpenMP
- *   - Write all results to a single SQLite database
- *   - Log progress and errors to a rotating plain-text log file
- *   - Support resume: chunks already marked DONE in the DB are skipped
+ *   - Write all results to a single CSV file
+ *   - Log progress and errors to a plain-text log file
  *
  * Build requirements:
  *   - C++17
  *   - pybind11
- *   - SQLite3  (libsqlite3-dev)
  *   - OpenMP   (-fopenmp)
  */
 
 #include <pybind11/pybind11.h>
 #include <pybind11/functional.h>
 #include <pybind11/stl.h>
-
-#include <sqlite3.h>
 
 #include <algorithm>
 #include <chrono>
@@ -46,7 +42,7 @@
 namespace py = pybind11;
 
 // -------------------------------------------------------------------------
-// CSV + row-wise math (Superstore-style rows: quoted fields, trailing numerics)
+// CSV + row-wise math (comma-separated text rows only; quoted fields supported)
 // -------------------------------------------------------------------------
 
 static void trim_inplace(std::string& s) {
@@ -224,6 +220,9 @@ std::string apply_csv_row_math_binary(
         throw std::invalid_argument("column indices must be non-negative");
 
     auto fields = split_csv_row(row);
+    if (fields.size() < 2)
+        throw std::invalid_argument(
+            "CSV only: each row must parse to at least two comma-separated columns");
     if (static_cast<size_t>(col_left) >= fields.size() ||
         static_cast<size_t>(col_right) >= fields.size())
         throw std::invalid_argument("column index out of range for CSV row");
@@ -258,6 +257,9 @@ std::string apply_csv_row_math_scalar(
         throw std::invalid_argument("column indices must be non-negative");
 
     auto fields = split_csv_row(row);
+    if (fields.size() < 2)
+        throw std::invalid_argument(
+            "CSV only: each row must parse to at least two comma-separated columns");
     if (static_cast<size_t>(col) >= fields.size())
         throw std::invalid_argument("column index out of range for CSV row");
 
@@ -291,6 +293,9 @@ std::vector<std::string> apply_csv_rows_math_binary(
     out.reserve(rows.size());
     for (size_t i = 0; i < rows.size(); ++i) {
         if (skip_header && i == 0) {
+            if (split_csv_row(rows[i]).size() < 2)
+                throw std::invalid_argument(
+                    "CSV only: header row must parse to at least two columns");
             out.push_back(rows[i]);
             continue;
         }
@@ -312,6 +317,9 @@ std::vector<std::string> apply_csv_rows_math_scalar(
     out.reserve(rows.size());
     for (size_t i = 0; i < rows.size(); ++i) {
         if (skip_header && i == 0) {
+            if (split_csv_row(rows[i]).size() < 2)
+                throw std::invalid_argument(
+                    "CSV only: header row must parse to at least two columns");
             out.push_back(rows[i]);
             continue;
         }
@@ -363,159 +371,17 @@ private:
 };
 
 // -------------------------------------------------------------------------
-// SQLite helpers
-// -------------------------------------------------------------------------
-
-class Database {
-public:
-    explicit Database(const std::string& path) : path_(path) {
-        if (sqlite3_open(path.c_str(), &db_) != SQLITE_OK)
-            throw std::runtime_error(std::string("Cannot open DB: ") + sqlite3_errmsg(db_));
-
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS chunks (
-                chunk_id   INTEGER PRIMARY KEY,
-                status     TEXT    NOT NULL DEFAULT 'PENDING',
-                records    INTEGER NOT NULL DEFAULT 0,
-                error_msg  TEXT
-            );
-        )");
-
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS results (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                chunk_id   INTEGER NOT NULL,
-                record     TEXT    NOT NULL,
-                FOREIGN KEY(chunk_id) REFERENCES chunks(chunk_id)
-            );
-        )");
-
-        // WAL mode: safe concurrent writes from OpenMP threads
-        exec("PRAGMA journal_mode=WAL;");
-        exec("PRAGMA synchronous=NORMAL;");
-    }
-
-    ~Database() {
-        if (db_) sqlite3_close(db_);
-    }
-
-    // Register a chunk as PENDING (ignored if already exists → resume support)
-    void register_chunk(int chunk_id, int num_records) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        std::string sql =
-            "INSERT OR IGNORE INTO chunks(chunk_id, status, records) VALUES(" +
-            std::to_string(chunk_id) + ", 'PENDING', " +
-            std::to_string(num_records) + ");";
-        exec_locked(sql);
-    }
-
-    // Return true when the chunk was already successfully processed
-    bool is_done(int chunk_id) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        std::string sql =
-            "SELECT status FROM chunks WHERE chunk_id=" +
-            std::to_string(chunk_id) + ";";
-        std::string status;
-        auto cb = [](void* out, int, char** vals, char**) -> int {
-            *static_cast<std::string*>(out) = vals[0] ? vals[0] : "";
-            return 0;
-        };
-        sqlite3_exec(db_, sql.c_str(), cb, &status, nullptr);
-        return status == "DONE";
-    }
-
-    // Write all processed records for a chunk and mark it DONE atomically
-    void save_chunk(int chunk_id, const std::vector<std::string>& records) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        exec_locked("BEGIN;");
-        for (const auto& rec : records) {
-            // Use prepared statement to safely escape content
-            std::string sql =
-                "INSERT INTO results(chunk_id, record) VALUES(" +
-                std::to_string(chunk_id) + ", ?);";
-            sqlite3_stmt* stmt = nullptr;
-            sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
-            sqlite3_bind_text(stmt, 1, rec.c_str(), (int)rec.size(), SQLITE_TRANSIENT);
-            sqlite3_step(stmt);
-            sqlite3_finalize(stmt);
-        }
-        exec_locked(
-            "UPDATE chunks SET status='DONE', records=" +
-            std::to_string(records.size()) +
-            " WHERE chunk_id=" + std::to_string(chunk_id) + ";"
-        );
-        exec_locked("COMMIT;");
-    }
-
-    // Mark a chunk as FAILED with an error message
-    void fail_chunk(int chunk_id, const std::string& error) {
-        std::lock_guard<std::mutex> lk(mtx_);
-        sqlite3_stmt* stmt = nullptr;
-        const char* sql =
-            "UPDATE chunks SET status='FAILED', error_msg=? WHERE chunk_id=?;";
-        sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
-        sqlite3_bind_text(stmt, 1, error.c_str(), (int)error.size(), SQLITE_TRANSIENT);
-        sqlite3_bind_int (stmt, 2, chunk_id);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-    }
-
-    // Summary counts for the Python-side RunSummary
-    std::tuple<int,int,int> counts() {
-        std::lock_guard<std::mutex> lk(mtx_);
-        int done = 0, failed = 0, total = 0;
-        auto cb = [](void* out, int, char** v, char**) -> int {
-            auto* t = static_cast<std::tuple<int,int,int>*>(out);
-            std::get<0>(*t) = v[0] ? std::stoi(v[0]) : 0;
-            std::get<1>(*t) = v[1] ? std::stoi(v[1]) : 0;
-            std::get<2>(*t) = v[2] ? std::stoi(v[2]) : 0;
-            return 0;
-        };
-        auto t = std::make_tuple(0,0,0);
-        sqlite3_exec(db_,
-            "SELECT "
-            "  SUM(status='DONE'),"
-            "  SUM(status='FAILED'),"
-            "  COUNT(*)"
-            " FROM chunks;",
-            cb, &t, nullptr);
-        return t;
-    }
-
-private:
-    std::string path_;
-    sqlite3*    db_  = nullptr;
-    std::mutex  mtx_;
-
-    void exec(const std::string& sql) {
-        char* err = nullptr;
-        if (sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err) != SQLITE_OK) {
-            std::string msg = err ? err : "unknown error";
-            sqlite3_free(err);
-            throw std::runtime_error("SQLite error: " + msg);
-        }
-    }
-
-    // Must be called while mtx_ is already held
-    void exec_locked(const std::string& sql) {
-        char* err = nullptr;
-        sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err);
-        if (err) sqlite3_free(err);   // errors surface via status field
-    }
-};
-
-// -------------------------------------------------------------------------
 // Core processing function exposed to Python
 // -------------------------------------------------------------------------
 
 /*
- * process(records, transform_fn, db_path, log_path, chunk_size, num_threads)
+ * process(records, transform_fn, output_path, log_path, chunk_size, num_threads)
  *
  * Parameters
  * ----------
  * records       : list[str]   — flat list of serialised records
  * transform_fn  : callable    — Python callable, receives one str, returns str
- * db_path       : str         — path to the SQLite output file
+ * output_path   : str         — path to the CSV output file
  * log_path      : str         — path to the plain-text log file
  * chunk_size    : int         — number of records per chunk (default 500)
  * num_threads   : int         — OpenMP thread count; 0 = auto (default 0)
@@ -527,7 +393,7 @@ private:
 py::dict process(
     const std::vector<std::string>& records,
     const py::object&               transform_fn,
-    const std::string&              db_path,
+    const std::string&              output_path,
     const std::string&              log_path,
     int                             chunk_size  = 500,
     int                             num_threads = 0
@@ -545,7 +411,9 @@ py::dict process(
 #endif
 
     Logger   log(log_path);
-    Database db(db_path);
+    std::ofstream out_file(output_path);
+    if (!out_file.is_open())
+        throw std::runtime_error("Cannot open output file: " + output_path);
 
     // ---- split into chunks ----
     struct Chunk { int id; std::vector<std::string> items; };
@@ -569,10 +437,6 @@ py::dict process(
              " | OpenMP max threads (info): " + std::to_string(actual_threads) +
              " | Python transform: sequential (safe GIL)");
 
-    // Register every chunk (INSERT OR IGNORE → resume-safe)
-    for (const auto& c : chunks)
-        db.register_chunk(c.id, (int)c.items.size());
-
     // ---- chunk processing (sequential; Python transform is not OpenMP-safe) ----
     // OpenMP + multiple worker threads calling pybind11 / Python is undefined on
     // many platforms (e.g. Windows access violations). Process one chunk at a time
@@ -583,12 +447,6 @@ py::dict process(
 
     for (int ci = 0; ci < total; ++ci) {
         const Chunk& chunk = chunks[ci];
-
-        if (db.is_done(chunk.id)) {
-            log.info("Chunk " + std::to_string(chunk.id) + " skipped (already DONE)");
-            ++skip_count;
-            continue;
-        }
 
         log.info("Chunk " + std::to_string(chunk.id) +
                  " started (" + std::to_string(chunk.items.size()) + " records)"
@@ -617,12 +475,13 @@ py::dict process(
         }
 
         if (had_error) {
-            db.fail_chunk(chunk.id, error_msg);
             log.error("Chunk " + std::to_string(chunk.id) +
                       " FAILED — " + error_msg);
             ++fail_count;
         } else {
-            db.save_chunk(chunk.id, out_records);
+            for (const auto& rec : out_records) {
+                out_file << rec << "\n";
+            }
             log.info("Chunk " + std::to_string(chunk.id) + " DONE ("
                      + std::to_string(out_records.size()) + " records written)");
             ++done_count;
@@ -653,46 +512,48 @@ py::dict process(
 // -------------------------------------------------------------------------
 
 PYBIND11_MODULE(chunkflow_core, m) {
-    m.doc() = "chunkflow C++ core — parallel chunked processing with SQLite output";
+    m.doc() =
+        "chunkflow C++ core — CSV chunk pipeline plus CSV-only row tools "
+        "(comma-separated lines; apply_* math requires >=2 columns per row).";
 
     m.def("split_csv_row", &split_csv_row, py::arg("line"),
-        "Split a single CSV line into fields (handles quoted commas).");
+        "Split one comma-separated CSV line (RFC4180-style quotes).");
     m.def("join_csv_row", &join_csv_row, py::arg("fields"),
-        "Join fields into one CSV line (quotes fields when needed).");
+        "Join fields into one CSV line; output is suitable for a .csv file.");
 
     m.def("apply_csv_row_math_binary", &apply_csv_row_math_binary,
         py::arg("row"), py::arg("operation"), py::arg("col_left"),
         py::arg("col_right"), py::arg("col_out"),
         R"doc(
-Binary math on two numeric columns (0-based indices). *operation* is one of:
-add/sub/mul/div (or + - * /). If *col_out* equals the current field count, append
-a new column; otherwise replace that column.
+CSV row in, CSV row out. *row* must be comma-separated with at least two columns.
+Binary math on two numeric columns (0-based indices). *operation*: add/sub/mul/div
+(or + - * /). If *col_out* equals the current field count, append a column; else replace.
         )doc");
 
     m.def("apply_csv_row_math_scalar", &apply_csv_row_math_scalar,
         py::arg("row"), py::arg("operation"), py::arg("col"),
         py::arg("scalar"), py::arg("col_out"),
-        "Apply add/sub/mul/div between the numeric value at *col* and *scalar*.");
+        "CSV row in/out; >=2 columns. Scalar op on *col* (add/sub/mul/div).");
 
     m.def("apply_csv_rows_math_binary", &apply_csv_rows_math_binary,
         py::arg("rows"), py::arg("operation"), py::arg("col_left"),
         py::arg("col_right"), py::arg("col_out"), py::arg("skip_header") = false,
-        "Run apply_csv_row_math_binary on every string in rows.");
+        "List of CSV lines -> list of CSV lines (same constraints as row-wise binary).");
 
     m.def("apply_csv_rows_math_scalar", &apply_csv_rows_math_scalar,
         py::arg("rows"), py::arg("operation"), py::arg("col"),
         py::arg("scalar"), py::arg("col_out"), py::arg("skip_header") = false,
-        "Run apply_csv_row_math_scalar on every string in rows.");
+        "List of CSV lines -> list of CSV lines (same constraints as row-wise scalar).");
 
     m.def("process", &process,
         py::arg("records"),
         py::arg("transform_fn"),
-        py::arg("db_path"),
+        py::arg("output_path"),
         py::arg("log_path"),
         py::arg("chunk_size")  = 500,
         py::arg("num_threads") = 0,
         R"doc(
-Process *records* in parallel chunks and write results to a SQLite database.
+Process *records* in parallel chunks and write results to a CSV file.
 
 Parameters
 ----------
@@ -700,8 +561,8 @@ records : list[str]
     Flat list of serialised records (strings).
 transform_fn : callable[[str], str]
     Called once per record.  Must accept a str and return a str.
-db_path : str
-    Path to the SQLite output file (created if absent; resumed if present).
+output_path : str
+    Path to the CSV output file (overwritten if exists).
 log_path : str
     Path to the plain-text progress log (always appended to).
 chunk_size : int, optional

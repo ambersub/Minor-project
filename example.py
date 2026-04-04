@@ -8,7 +8,7 @@ Run after building the extension:
 
 import json
 import math
-from chunkflow import ChunkProcessor
+from chunkflow.chunking import ChunkProcessor
 
 
 # ---------------------------------------------------------------------------
