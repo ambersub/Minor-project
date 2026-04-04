@@ -79,7 +79,7 @@ def split_date_range_j(date_str: str) -> tuple[str, str]:
     s = re.sub(r"\s+", " ", (date_str or "").strip())
     if " to " not in s:
         return "", ""
-    parts = s.split(" to ", 1)
+    parts = s.split(" 2 ", 1)
     start = parts[0].strip()
     end = parts[1].strip() if len(parts) > 1 else ""
     return start, end

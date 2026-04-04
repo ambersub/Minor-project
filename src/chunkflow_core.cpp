@@ -24,12 +24,16 @@
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -40,6 +44,281 @@
 #endif
 
 namespace py = pybind11;
+
+// -------------------------------------------------------------------------
+// CSV + row-wise math (Superstore-style rows: quoted fields, trailing numerics)
+// -------------------------------------------------------------------------
+
+static void trim_inplace(std::string& s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front())))
+        s.erase(s.begin());
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
+        s.pop_back();
+}
+
+/** Split one CSV line; supports double quotes and escaped "" inside quoted fields. */
+std::vector<std::string> split_csv_row(const std::string& line) {
+    std::vector<std::string> out;
+    std::string cur;
+    cur.reserve(64);
+    bool in_quotes = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+        char c = line[i];
+        if (in_quotes) {
+            if (c == '"') {
+                if (i + 1 < line.size() && line[i + 1] == '"') {
+                    cur += '"';
+                    ++i;
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                cur += c;
+            }
+        } else {
+            if (c == '"') {
+                in_quotes = true;
+            } else if (c == ',') {
+                trim_inplace(cur);
+                out.push_back(std::move(cur));
+                cur.clear();
+            } else {
+                cur += c;
+            }
+        }
+    }
+    trim_inplace(cur);
+    out.push_back(std::move(cur));
+    return out;
+}
+
+static bool csv_field_needs_quotes(const std::string& f) {
+    for (char c : f) {
+        if (c == ',' || c == '"' || c == '\r' || c == '\n')
+            return true;
+    }
+    return false;
+}
+
+/** Join fields to one CSV line (quote fields that contain comma, quote, or newline). */
+std::string join_csv_row(const std::vector<std::string>& fields) {
+    std::string out;
+    out.reserve(fields.size() * 16);
+    for (size_t i = 0; i < fields.size(); ++i) {
+        if (i)
+            out += ',';
+        const std::string& f = fields[i];
+        if (csv_field_needs_quotes(f)) {
+            out += '"';
+            for (char c : f) {
+                if (c == '"')
+                    out += "\"\"";
+                else
+                    out += c;
+            }
+            out += '"';
+        } else {
+            out += f;
+        }
+    }
+    return out;
+}
+
+static std::optional<double> parse_double_field(const std::string& s) {
+    if (s.empty())
+        return std::nullopt;
+    try {
+        size_t idx = 0;
+        double v = std::stod(s, &idx);
+        while (idx < s.size() && std::isspace(static_cast<unsigned char>(s[idx])))
+            ++idx;
+        if (idx != s.size())
+            return std::nullopt;
+        return v;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+enum class MathOpBinary { Add, Sub, Mul, Div };
+
+static MathOpBinary parse_op_binary(const std::string& op) {
+    std::string k = op;
+    std::transform(k.begin(), k.end(), k.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (k == "add" || k == "+")
+        return MathOpBinary::Add;
+    if (k == "sub" || k == "subtract" || k == "-")
+        return MathOpBinary::Sub;
+    if (k == "mul" || k == "multiply" || k == "*")
+        return MathOpBinary::Mul;
+    if (k == "div" || k == "divide" || k == "/")
+        return MathOpBinary::Div;
+    throw std::invalid_argument("unknown operation: " + op +
+        " (use add, sub, mul, div or + - * /)");
+}
+
+static double apply_binary(MathOpBinary op, double a, double b) {
+    switch (op) {
+        case MathOpBinary::Add: return a + b;
+        case MathOpBinary::Sub: return a - b;
+        case MathOpBinary::Mul: return a * b;
+        case MathOpBinary::Div:
+            if (b == 0.0)
+                throw std::invalid_argument("division by zero");
+            return a / b;
+    }
+    return a;
+}
+
+enum class MathOpScalar { Add, Sub, Mul, Div };
+
+static MathOpScalar parse_op_scalar(const std::string& op) {
+    std::string k = op;
+    std::transform(k.begin(), k.end(), k.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (k == "add" || k == "+")
+        return MathOpScalar::Add;
+    if (k == "sub" || k == "subtract" || k == "-")
+        return MathOpScalar::Sub;
+    if (k == "mul" || k == "multiply" || k == "*")
+        return MathOpScalar::Mul;
+    if (k == "div" || k == "divide" || k == "/")
+        return MathOpScalar::Div;
+    throw std::invalid_argument("unknown operation: " + op +
+        " (use add, sub, mul, div or + - * /)");
+}
+
+static double apply_scalar(MathOpScalar op, double value, double scalar) {
+    switch (op) {
+        case MathOpScalar::Add: return value + scalar;
+        case MathOpScalar::Sub: return value - scalar;
+        case MathOpScalar::Mul: return value * scalar;
+        case MathOpScalar::Div:
+            if (scalar == 0.0)
+                throw std::invalid_argument("division by zero");
+            return value / scalar;
+    }
+    return value;
+}
+
+static std::string format_double_cell(double v) {
+    std::ostringstream oss;
+    oss.precision(17);
+    oss << std::defaultfloat << v;
+    return oss.str();
+}
+
+/**
+ * Parse *row* as CSV, read numeric columns *col_left* and *col_right* (0-based),
+ * compute *op*, write result to column *col_out* (append if col_out == field count).
+ */
+std::string apply_csv_row_math_binary(
+    const std::string& row,
+    const std::string& op,
+    int col_left,
+    int col_right,
+    int col_out
+) {
+    if (col_left < 0 || col_right < 0 || col_out < 0)
+        throw std::invalid_argument("column indices must be non-negative");
+
+    auto fields = split_csv_row(row);
+    if (static_cast<size_t>(col_left) >= fields.size() ||
+        static_cast<size_t>(col_right) >= fields.size())
+        throw std::invalid_argument("column index out of range for CSV row");
+
+    auto a = parse_double_field(fields[static_cast<size_t>(col_left)]);
+    auto b = parse_double_field(fields[static_cast<size_t>(col_right)]);
+    if (!a || !b)
+        throw std::invalid_argument("non-numeric value in selected column(s)");
+
+    double result = apply_binary(parse_op_binary(op), *a, *b);
+    if (static_cast<size_t>(col_out) > fields.size())
+        throw std::invalid_argument("col_out beyond one-past-last column index");
+
+    std::string cell = format_double_cell(result);
+    if (static_cast<size_t>(col_out) == fields.size())
+        fields.push_back(std::move(cell));
+    else
+        fields[static_cast<size_t>(col_out)] = std::move(cell);
+
+    return join_csv_row(fields);
+}
+
+/** Same as binary, but applies (value at *col*) *op* *scalar* into *col_out*. */
+std::string apply_csv_row_math_scalar(
+    const std::string& row,
+    const std::string& op,
+    int col,
+    double scalar,
+    int col_out
+) {
+    if (col < 0 || col_out < 0)
+        throw std::invalid_argument("column indices must be non-negative");
+
+    auto fields = split_csv_row(row);
+    if (static_cast<size_t>(col) >= fields.size())
+        throw std::invalid_argument("column index out of range for CSV row");
+
+    auto v = parse_double_field(fields[static_cast<size_t>(col)]);
+    if (!v)
+        throw std::invalid_argument("non-numeric value in selected column");
+
+    double result = apply_scalar(parse_op_scalar(op), *v, scalar);
+    if (static_cast<size_t>(col_out) > fields.size())
+        throw std::invalid_argument("col_out beyond one-past-last column index");
+
+    std::string cell = format_double_cell(result);
+    if (static_cast<size_t>(col_out) == fields.size())
+        fields.push_back(std::move(cell));
+    else
+        fields[static_cast<size_t>(col_out)] = std::move(cell);
+
+    return join_csv_row(fields);
+}
+
+/** Apply *apply_csv_row_math_binary* to every row. If *skip_header* is true, row 0 is unchanged. */
+std::vector<std::string> apply_csv_rows_math_binary(
+    const std::vector<std::string>& rows,
+    const std::string& op,
+    int col_left,
+    int col_right,
+    int col_out,
+    bool skip_header
+) {
+    std::vector<std::string> out;
+    out.reserve(rows.size());
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (skip_header && i == 0) {
+            out.push_back(rows[i]);
+            continue;
+        }
+        out.push_back(apply_csv_row_math_binary(rows[i], op, col_left, col_right, col_out));
+    }
+    return out;
+}
+
+/** Apply *apply_csv_row_math_scalar* to every row. If *skip_header* is true, row 0 is unchanged. */
+std::vector<std::string> apply_csv_rows_math_scalar(
+    const std::vector<std::string>& rows,
+    const std::string& op,
+    int col,
+    double scalar,
+    int col_out,
+    bool skip_header
+) {
+    std::vector<std::string> out;
+    out.reserve(rows.size());
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (skip_header && i == 0) {
+            out.push_back(rows[i]);
+            continue;
+        }
+        out.push_back(apply_csv_row_math_scalar(rows[i], op, col, scalar, col_out));
+    }
+    return out;
+}
 
 // -------------------------------------------------------------------------
 // Logging
@@ -375,6 +654,35 @@ py::dict process(
 
 PYBIND11_MODULE(chunkflow_core, m) {
     m.doc() = "chunkflow C++ core — parallel chunked processing with SQLite output";
+
+    m.def("split_csv_row", &split_csv_row, py::arg("line"),
+        "Split a single CSV line into fields (handles quoted commas).");
+    m.def("join_csv_row", &join_csv_row, py::arg("fields"),
+        "Join fields into one CSV line (quotes fields when needed).");
+
+    m.def("apply_csv_row_math_binary", &apply_csv_row_math_binary,
+        py::arg("row"), py::arg("operation"), py::arg("col_left"),
+        py::arg("col_right"), py::arg("col_out"),
+        R"doc(
+Binary math on two numeric columns (0-based indices). *operation* is one of:
+add/sub/mul/div (or + - * /). If *col_out* equals the current field count, append
+a new column; otherwise replace that column.
+        )doc");
+
+    m.def("apply_csv_row_math_scalar", &apply_csv_row_math_scalar,
+        py::arg("row"), py::arg("operation"), py::arg("col"),
+        py::arg("scalar"), py::arg("col_out"),
+        "Apply add/sub/mul/div between the numeric value at *col* and *scalar*.");
+
+    m.def("apply_csv_rows_math_binary", &apply_csv_rows_math_binary,
+        py::arg("rows"), py::arg("operation"), py::arg("col_left"),
+        py::arg("col_right"), py::arg("col_out"), py::arg("skip_header") = false,
+        "Run apply_csv_row_math_binary on every string in rows.");
+
+    m.def("apply_csv_rows_math_scalar", &apply_csv_rows_math_scalar,
+        py::arg("rows"), py::arg("operation"), py::arg("col"),
+        py::arg("scalar"), py::arg("col_out"), py::arg("skip_header") = false,
+        "Run apply_csv_row_math_scalar on every string in rows.");
 
     m.def("process", &process,
         py::arg("records"),
