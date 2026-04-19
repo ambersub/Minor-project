@@ -198,6 +198,261 @@ static double apply_scalar(MathOpScalar op, double value, double scalar) {
     return value;
 }
 
+// -------------------------------------------------------------------------
+// Extended Math Operations (sqrt, abs, pow, floor, ceil, min, max)
+// -------------------------------------------------------------------------
+
+enum class MathOpUnary { Sqrt, Abs, Floor, Ceil };
+
+static MathOpUnary parse_op_unary(const std::string& op) {
+    std::string k = op;
+    std::transform(k.begin(), k.end(), k.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (k == "sqrt")
+        return MathOpUnary::Sqrt;
+    if (k == "abs" || k == "absolute")
+        return MathOpUnary::Abs;
+    if (k == "floor")
+        return MathOpUnary::Floor;
+    if (k == "ceil" || k == "ceiling")
+        return MathOpUnary::Ceil;
+    throw std::invalid_argument("unknown unary operation: " + op +
+        " (use sqrt, abs, floor, ceil)");
+}
+
+static double apply_unary(MathOpUnary op, double value) {
+    switch (op) {
+        case MathOpUnary::Sqrt:
+            if (value < 0.0)
+                throw std::invalid_argument("sqrt of negative number");
+            return std::sqrt(value);
+        case MathOpUnary::Abs: return std::fabs(value);
+        case MathOpUnary::Floor: return std::floor(value);
+        case MathOpUnary::Ceil: return std::ceil(value);
+    }
+    return value;
+}
+
+/** Apply unary operation to one CSV row column */
+std::string apply_csv_row_math_unary(
+    const std::string& row,
+    const std::string& op,
+    int col,
+    int col_out
+) {
+    if (col < 0 || col_out < 0)
+        throw std::invalid_argument("column indices must be non-negative");
+
+    auto fields = split_csv_row(row);
+    if (fields.size() < 1)
+        throw std::invalid_argument("CSV row must have at least one column");
+    if (static_cast<size_t>(col) >= fields.size())
+        throw std::invalid_argument("column index out of range for CSV row");
+
+    auto v = parse_double_field(fields[static_cast<size_t>(col)]);
+    if (!v)
+        throw std::invalid_argument("non-numeric value in selected column");
+
+    double result = apply_unary(parse_op_unary(op), *v);
+    if (static_cast<size_t>(col_out) > fields.size())
+        throw std::invalid_argument("col_out beyond one-past-last column index");
+
+    std::string cell = format_double_cell(result);
+    if (static_cast<size_t>(col_out) == fields.size())
+        fields.push_back(std::move(cell));
+    else
+        fields[static_cast<size_t>(col_out)] = std::move(cell);
+
+    return join_csv_row(fields);
+}
+
+/** Apply unary operation to all rows in a list */
+std::vector<std::string> apply_csv_rows_math_unary(
+    const std::vector<std::string>& rows,
+    const std::string& op,
+    int col,
+    int col_out,
+    bool skip_header
+) {
+    std::vector<std::string> out;
+    out.reserve(rows.size());
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (skip_header && i == 0) {
+            if (split_csv_row(rows[i]).size() < 1)
+                throw std::invalid_argument(
+                    "CSV only: header row must parse to at least one column");
+            out.push_back(rows[i]);
+            continue;
+        }
+        out.push_back(apply_csv_row_math_unary(rows[i], op, col, col_out));
+    }
+    return out;
+}
+
+/** Apply power operation: col^exponent */
+std::string apply_csv_row_math_power(
+    const std::string& row,
+    int col,
+    double exponent,
+    int col_out
+) {
+    if (col < 0 || col_out < 0)
+        throw std::invalid_argument("column indices must be non-negative");
+
+    auto fields = split_csv_row(row);
+    if (fields.size() < 1)
+        throw std::invalid_argument("CSV row must have at least one column");
+    if (static_cast<size_t>(col) >= fields.size())
+        throw std::invalid_argument("column index out of range for CSV row");
+
+    auto v = parse_double_field(fields[static_cast<size_t>(col)]);
+    if (!v)
+        throw std::invalid_argument("non-numeric value in selected column");
+
+    double result = std::pow(*v, exponent);
+    if (static_cast<size_t>(col_out) > fields.size())
+        throw std::invalid_argument("col_out beyond one-past-last column index");
+
+    std::string cell = format_double_cell(result);
+    if (static_cast<size_t>(col_out) == fields.size())
+        fields.push_back(std::move(cell));
+    else
+        fields[static_cast<size_t>(col_out)] = std::move(cell);
+
+    return join_csv_row(fields);
+}
+
+// -------------------------------------------------------------------------
+// Delimiter-based Row Processing
+// -------------------------------------------------------------------------
+
+/** Split row with custom delimiter (supports optional quote character) */
+std::vector<std::string> split_delimited_row(
+    const std::string& line,
+    const std::string& delimiter,
+    bool use_quotes = false
+) {
+    if (delimiter.empty())
+        throw std::invalid_argument("delimiter cannot be empty");
+
+    std::vector<std::string> out;
+    std::string cur;
+    cur.reserve(64);
+    bool in_quotes = false;
+    char quote_char = '"';
+
+    size_t i = 0;
+    while (i < line.size()) {
+        if (use_quotes && line[i] == quote_char) {
+            if (in_quotes && i + 1 < line.size() && line[i + 1] == quote_char) {
+                cur += quote_char;
+                i += 2;
+            } else {
+                in_quotes = !in_quotes;
+                ++i;
+            }
+        } else if (!in_quotes && i + delimiter.size() <= line.size() &&
+                   line.substr(i, delimiter.size()) == delimiter) {
+            trim_inplace(cur);
+            out.push_back(std::move(cur));
+            cur.clear();
+            i += delimiter.size();
+        } else {
+            cur += line[i];
+            ++i;
+        }
+    }
+    trim_inplace(cur);
+    out.push_back(std::move(cur));
+    return out;
+}
+
+/** Join fields with custom delimiter */
+std::string join_delimited_row(
+    const std::vector<std::string>& fields,
+    const std::string& delimiter
+) {
+    if (delimiter.empty())
+        throw std::invalid_argument("delimiter cannot be empty");
+
+    std::string out;
+    out.reserve(fields.size() * 16);
+    for (size_t i = 0; i < fields.size(); ++i) {
+        if (i > 0)
+            out += delimiter;
+        out += fields[i];
+    }
+    return out;
+}
+
+// -------------------------------------------------------------------------
+// Row Filtering
+// -------------------------------------------------------------------------
+
+/** Filter rows based on a Python predicate function */
+std::vector<std::string> filter_rows(
+    const std::vector<std::string>& rows,
+    const py::object& predicate_fn
+) {
+    std::vector<std::string> out;
+    out.reserve(rows.size());
+
+    for (const auto& row : rows) {
+        try {
+            py::gil_scoped_acquire gil;
+            py::object result = predicate_fn(py::str(row));
+            if (result.cast<bool>()) {
+                out.push_back(row);
+            }
+        } catch (const py::error_already_set& e) {
+            throw std::runtime_error(std::string("Filter predicate error: ") + e.what());
+        }
+    }
+    return out;
+}
+
+/** Filter based on field value (equality check). Supports delimiters. */
+std::vector<std::string> filter_rows_by_field(
+    const std::vector<std::string>& rows,
+    int col,
+    const std::string& value,
+    const std::string& delimiter = ","
+) {
+    std::vector<std::string> out;
+    out.reserve(rows.size());
+
+    for (const auto& row : rows) {
+        auto fields = split_delimited_row(row, delimiter);
+        if (static_cast<size_t>(col) < fields.size() && fields[col] == value) {
+            out.push_back(row);
+        }
+    }
+    return out;
+}
+
+/** Filter rows where numeric field is in range [min_val, max_val] */
+std::vector<std::string> filter_rows_by_range(
+    const std::vector<std::string>& rows,
+    int col,
+    double min_val,
+    double max_val,
+    const std::string& delimiter = ","
+) {
+    std::vector<std::string> out;
+    out.reserve(rows.size());
+
+    for (const auto& row : rows) {
+        auto fields = split_delimited_row(row, delimiter);
+        if (static_cast<size_t>(col) < fields.size()) {
+            auto v = parse_double_field(fields[col]);
+            if (v && *v >= min_val && *v <= max_val) {
+                out.push_back(row);
+            }
+        }
+    }
+    return out;
+}
+
 static std::string format_double_cell(double v) {
     std::ostringstream oss;
     oss.precision(17);
@@ -513,14 +768,22 @@ py::dict process(
 
 PYBIND11_MODULE(chunkflow_core, m) {
     m.doc() =
-        "chunkflow C++ core — CSV chunk pipeline plus CSV-only row tools "
-        "(comma-separated lines; apply_* math requires >=2 columns per row).";
+        "chunkflow C++ core — CSV/delimiter chunk pipeline with extended row tools "
+        "(split/join, arithmetic, filtering, and custom logic).";
 
+    // CSV and delimiter splitting/joining
     m.def("split_csv_row", &split_csv_row, py::arg("line"),
         "Split one comma-separated CSV line (RFC4180-style quotes).");
     m.def("join_csv_row", &join_csv_row, py::arg("fields"),
         "Join fields into one CSV line; output is suitable for a .csv file.");
+    m.def("split_delimited_row", &split_delimited_row,
+        py::arg("line"), py::arg("delimiter"), py::arg("use_quotes") = false,
+        "Split row with custom delimiter (e.g., '\\t', '|', ';').");
+    m.def("join_delimited_row", &join_delimited_row,
+        py::arg("fields"), py::arg("delimiter"),
+        "Join fields with custom delimiter.");
 
+    // Basic binary and scalar arithmetic
     m.def("apply_csv_row_math_binary", &apply_csv_row_math_binary,
         py::arg("row"), py::arg("operation"), py::arg("col_left"),
         py::arg("col_right"), py::arg("col_out"),
@@ -533,7 +796,7 @@ Binary math on two numeric columns (0-based indices). *operation*: add/sub/mul/d
     m.def("apply_csv_row_math_scalar", &apply_csv_row_math_scalar,
         py::arg("row"), py::arg("operation"), py::arg("col"),
         py::arg("scalar"), py::arg("col_out"),
-        "CSV row in/out; >=2 columns. Scalar op on *col* (add/sub/mul/div).");
+        "CSV row in/out; >=1 columns. Scalar op on *col* (add/sub/mul/div).");
 
     m.def("apply_csv_rows_math_binary", &apply_csv_rows_math_binary,
         py::arg("rows"), py::arg("operation"), py::arg("col_left"),
@@ -545,6 +808,35 @@ Binary math on two numeric columns (0-based indices). *operation*: add/sub/mul/d
         py::arg("scalar"), py::arg("col_out"), py::arg("skip_header") = false,
         "List of CSV lines -> list of CSV lines (same constraints as row-wise scalar).");
 
+    // Extended unary and advanced arithmetic
+    m.def("apply_csv_row_math_unary", &apply_csv_row_math_unary,
+        py::arg("row"), py::arg("operation"), py::arg("col"), py::arg("col_out"),
+        "Apply unary operation (sqrt, abs, floor, ceil) to a column.");
+
+    m.def("apply_csv_rows_math_unary", &apply_csv_rows_math_unary,
+        py::arg("rows"), py::arg("operation"), py::arg("col"), py::arg("col_out"),
+        py::arg("skip_header") = false,
+        "Apply unary operation to all rows (skips header if flag set).");
+
+    m.def("apply_csv_row_math_power", &apply_csv_row_math_power,
+        py::arg("row"), py::arg("col"), py::arg("exponent"), py::arg("col_out"),
+        "Raise a numeric column to a power: col^exponent.");
+
+    // Filtering
+    m.def("filter_rows", &filter_rows,
+        py::arg("rows"), py::arg("predicate_fn"),
+        "Filter rows using a Python predicate function (takes row string, returns bool).");
+
+    m.def("filter_rows_by_field", &filter_rows_by_field,
+        py::arg("rows"), py::arg("col"), py::arg("value"), py::arg("delimiter") = ",",
+        "Filter rows where column value equals a string. Delimiter defaults to comma.");
+
+    m.def("filter_rows_by_range", &filter_rows_by_range,
+        py::arg("rows"), py::arg("col"), py::arg("min_val"), py::arg("max_val"),
+        py::arg("delimiter") = ",",
+        "Filter rows where numeric column is in range [min_val, max_val].");
+
+    // Core chunked processing
     m.def("process", &process,
         py::arg("records"),
         py::arg("transform_fn"),
@@ -553,7 +845,7 @@ Binary math on two numeric columns (0-based indices). *operation*: add/sub/mul/d
         py::arg("chunk_size")  = 500,
         py::arg("num_threads") = 0,
         R"doc(
-Process *records* in parallel chunks and write results to a CSV file.
+Process *records* in parallel chunks and write results to a file.
 
 Parameters
 ----------
@@ -562,7 +854,7 @@ records : list[str]
 transform_fn : callable[[str], str]
     Called once per record.  Must accept a str and return a str.
 output_path : str
-    Path to the CSV output file (overwritten if exists).
+    Path to the output file (overwritten if exists).
 log_path : str
     Path to the plain-text progress log (always appended to).
 chunk_size : int, optional

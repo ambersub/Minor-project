@@ -4,7 +4,7 @@ write **CSV** ``output.csv`` (comma-separated lines, UTF-8).
 
 - Tests: ``python -m pytest tests/test_superstore_sample_addition.py -v``
 - CLI: ``python tests/test_superstore_sample_addition.py [input.csv] [output.csv]``
-  (defaults: fixture → repo ``output.csv``). Paths must end with ``.csv``.
+(defaults: fixture → repo ``output.csv``). Paths must end with ``.csv``.
 
 On Windows DLL errors for ``chunkflow_core``, see PATH / ``CHUNKFLOW_MINGW_BIN``.
 """
