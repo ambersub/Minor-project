@@ -33,6 +33,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #ifdef _OPENMP
@@ -44,6 +45,8 @@ namespace py = pybind11;
 // -------------------------------------------------------------------------
 // CSV + row-wise math (comma-separated text rows only; quoted fields supported)
 // -------------------------------------------------------------------------
+
+static std::string format_double_cell(double v);
 
 static void trim_inplace(std::string& s) {
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front())))
@@ -266,7 +269,7 @@ std::string apply_csv_row_math_unary(
     return join_csv_row(fields);
 }
 
-/** Apply unary operation to all rows in a list */
+/** Apply unary operation to all rows in a list (OpenMP threaded) */
 std::vector<std::string> apply_csv_rows_math_unary(
     const std::vector<std::string>& rows,
     const std::string& op,
@@ -274,18 +277,27 @@ std::vector<std::string> apply_csv_rows_math_unary(
     int col_out,
     bool skip_header
 ) {
-    std::vector<std::string> out;
-    out.reserve(rows.size());
-    for (size_t i = 0; i < rows.size(); ++i) {
-        if (skip_header && i == 0) {
-            if (split_csv_row(rows[i]).size() < 1)
-                throw std::invalid_argument(
-                    "CSV only: header row must parse to at least one column");
-            out.push_back(rows[i]);
-            continue;
+    std::vector<std::string> out(rows.size());
+    bool error_flag = false;
+    std::string error_msg;
+    
+    #pragma omp parallel for
+    for (int i = 0; i < (int)rows.size(); ++i) {
+        if (error_flag) continue;
+        try {
+            if (skip_header && i == 0) {
+                if (split_csv_row(rows[i]).size() < 1)
+                    throw std::invalid_argument("CSV only: header row must parse to at least one column");
+                out[i] = rows[i];
+                continue;
+            }
+            out[i] = apply_csv_row_math_unary(rows[i], op, col, col_out);
+        } catch (const std::exception& e) {
+            #pragma omp critical
+            { error_flag = true; if (error_msg.empty()) error_msg = e.what(); }
         }
-        out.push_back(apply_csv_row_math_unary(rows[i], op, col, col_out));
     }
+    if (error_flag) throw std::invalid_argument(error_msg);
     return out;
 }
 
@@ -535,7 +547,7 @@ std::string apply_csv_row_math_scalar(
     return join_csv_row(fields);
 }
 
-/** Apply *apply_csv_row_math_binary* to every row. If *skip_header* is true, row 0 is unchanged. */
+/** Apply *apply_csv_row_math_binary* to every row. If *skip_header* is true, row 0 is unchanged. (OpenMP threaded) */
 std::vector<std::string> apply_csv_rows_math_binary(
     const std::vector<std::string>& rows,
     const std::string& op,
@@ -544,22 +556,31 @@ std::vector<std::string> apply_csv_rows_math_binary(
     int col_out,
     bool skip_header
 ) {
-    std::vector<std::string> out;
-    out.reserve(rows.size());
-    for (size_t i = 0; i < rows.size(); ++i) {
-        if (skip_header && i == 0) {
-            if (split_csv_row(rows[i]).size() < 2)
-                throw std::invalid_argument(
-                    "CSV only: header row must parse to at least two columns");
-            out.push_back(rows[i]);
-            continue;
+    std::vector<std::string> out(rows.size());
+    bool error_flag = false;
+    std::string error_msg;
+    
+    #pragma omp parallel for
+    for (int i = 0; i < (int)rows.size(); ++i) {
+        if (error_flag) continue;
+        try {
+            if (skip_header && i == 0) {
+                if (split_csv_row(rows[i]).size() < 2)
+                    throw std::invalid_argument("CSV only: header row must parse to at least two columns");
+                out[i] = rows[i];
+                continue;
+            }
+            out[i] = apply_csv_row_math_binary(rows[i], op, col_left, col_right, col_out);
+        } catch (const std::exception& e) {
+            #pragma omp critical
+            { error_flag = true; if (error_msg.empty()) error_msg = e.what(); }
         }
-        out.push_back(apply_csv_row_math_binary(rows[i], op, col_left, col_right, col_out));
     }
+    if (error_flag) throw std::invalid_argument(error_msg);
     return out;
 }
 
-/** Apply *apply_csv_row_math_scalar* to every row. If *skip_header* is true, row 0 is unchanged. */
+/** Apply *apply_csv_row_math_scalar* to every row. If *skip_header* is true, row 0 is unchanged. (OpenMP threaded) */
 std::vector<std::string> apply_csv_rows_math_scalar(
     const std::vector<std::string>& rows,
     const std::string& op,
@@ -568,18 +589,164 @@ std::vector<std::string> apply_csv_rows_math_scalar(
     int col_out,
     bool skip_header
 ) {
-    std::vector<std::string> out;
-    out.reserve(rows.size());
-    for (size_t i = 0; i < rows.size(); ++i) {
-        if (skip_header && i == 0) {
-            if (split_csv_row(rows[i]).size() < 2)
-                throw std::invalid_argument(
-                    "CSV only: header row must parse to at least two columns");
-            out.push_back(rows[i]);
-            continue;
+    std::vector<std::string> out(rows.size());
+    bool error_flag = false;
+    std::string error_msg;
+    
+    #pragma omp parallel for
+    for (int i = 0; i < (int)rows.size(); ++i) {
+        if (error_flag) continue;
+        try {
+            if (skip_header && i == 0) {
+                if (split_csv_row(rows[i]).size() < 2)
+                    throw std::invalid_argument("CSV only: header row must parse to at least two columns");
+                out[i] = rows[i];
+                continue;
+            }
+            out[i] = apply_csv_row_math_scalar(rows[i], op, col, scalar, col_out);
+        } catch (const std::exception& e) {
+            #pragma omp critical
+            { error_flag = true; if (error_msg.empty()) error_msg = e.what(); }
         }
-        out.push_back(apply_csv_row_math_scalar(rows[i], op, col, scalar, col_out));
     }
+    if (error_flag) throw std::invalid_argument(error_msg);
+    return out;
+}
+
+// -------------------------------------------------------------------------
+// Aggregation Operations
+// -------------------------------------------------------------------------
+
+enum class AggOp { Sum, Product, Average };
+
+static AggOp parse_agg_op(const std::string& op) {
+    std::string k = op;
+    std::transform(k.begin(), k.end(), k.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    if (k == "sum") return AggOp::Sum;
+    if (k == "product" || k == "prod") return AggOp::Product;
+    if (k == "average" || k == "avg") return AggOp::Average;
+    throw std::invalid_argument("unknown aggregation operation: " + op);
+}
+
+double aggregate_csv_column(const std::vector<std::string>& rows, const std::string& op, int col, bool skip_header) {
+    AggOp agg = parse_agg_op(op);
+    double result = (agg == AggOp::Product) ? 1.0 : 0.0;
+    int count = 0;
+    bool error_flag = false;
+    std::string error_msg;
+    
+    #pragma omp parallel
+    {
+        double local_sum = 0.0;
+        double local_prod = 1.0;
+        int local_count = 0;
+        
+        #pragma omp for
+        for (int i = 0; i < (int)rows.size(); ++i) {
+            if (error_flag) continue;
+            if (skip_header && i == 0) continue;
+            try {
+                auto fields = split_csv_row(rows[i]);
+                if (static_cast<size_t>(col) >= fields.size())
+                    throw std::invalid_argument("column index out of range");
+                auto v = parse_double_field(fields[col]);
+                if (!v)
+                    throw std::invalid_argument("non-numeric value in selected column");
+                if (agg == AggOp::Sum || agg == AggOp::Average) local_sum += *v;
+                if (agg == AggOp::Product) local_prod *= *v;
+                local_count++;
+            } catch (const std::exception& e) {
+                #pragma omp critical
+                { error_flag = true; if (error_msg.empty()) error_msg = e.what(); }
+            }
+        }
+        
+        #pragma omp critical
+        {
+            if (agg == AggOp::Sum || agg == AggOp::Average) result += local_sum;
+            if (agg == AggOp::Product) result *= local_prod;
+            count += local_count;
+        }
+    }
+    
+    if (error_flag) throw std::invalid_argument(error_msg);
+    if (agg == AggOp::Average) {
+        if (count == 0) return 0.0;
+        return result / count;
+    }
+    return result;
+}
+
+// -------------------------------------------------------------------------
+// String Handling (Trim, Concat)
+// -------------------------------------------------------------------------
+
+std::string trim_csv_row_column(const std::string& row, int col) {
+    if (col < 0) throw std::invalid_argument("column index must be non-negative");
+    auto fields = split_csv_row(row);
+    if (static_cast<size_t>(col) >= fields.size())
+        throw std::invalid_argument("column index out of range for CSV row");
+    
+    trim_inplace(fields[col]);
+    return join_csv_row(fields);
+}
+
+std::vector<std::string> trim_csv_rows_column(const std::vector<std::string>& rows, int col, bool skip_header) {
+    std::vector<std::string> out(rows.size());
+    bool error_flag = false;
+    std::string error_msg;
+    
+    #pragma omp parallel for
+    for (int i = 0; i < (int)rows.size(); ++i) {
+        if (error_flag) continue;
+        try {
+            if (skip_header && i == 0) { out[i] = rows[i]; continue; }
+            out[i] = trim_csv_row_column(rows[i], col);
+        } catch (const std::exception& e) {
+            #pragma omp critical
+            { error_flag = true; if (error_msg.empty()) error_msg = e.what(); }
+        }
+    }
+    if (error_flag) throw std::invalid_argument(error_msg);
+    return out;
+}
+
+std::string concat_csv_row_columns(const std::string& row, int col_left, int col_right, const std::string& sep, int col_out) {
+    if (col_left < 0 || col_right < 0 || col_out < 0) throw std::invalid_argument("column indices must be non-negative");
+    auto fields = split_csv_row(row);
+    if (static_cast<size_t>(col_left) >= fields.size() || static_cast<size_t>(col_right) >= fields.size())
+        throw std::invalid_argument("column index out of range for CSV row");
+        
+    std::string result = fields[col_left] + sep + fields[col_right];
+    
+    if (static_cast<size_t>(col_out) > fields.size())
+        throw std::invalid_argument("col_out beyond one-past-last column index");
+        
+    if (static_cast<size_t>(col_out) == fields.size())
+        fields.push_back(std::move(result));
+    else
+        fields[col_out] = std::move(result);
+        
+    return join_csv_row(fields);
+}
+
+std::vector<std::string> concat_csv_rows_columns(const std::vector<std::string>& rows, int col_left, int col_right, const std::string& sep, int col_out, bool skip_header) {
+    std::vector<std::string> out(rows.size());
+    bool error_flag = false;
+    std::string error_msg;
+    
+    #pragma omp parallel for
+    for (int i = 0; i < (int)rows.size(); ++i) {
+        if (error_flag) continue;
+        try {
+            if (skip_header && i == 0) { out[i] = rows[i]; continue; }
+            out[i] = concat_csv_row_columns(rows[i], col_left, col_right, sep, col_out);
+        } catch (const std::exception& e) {
+            #pragma omp critical
+            { error_flag = true; if (error_msg.empty()) error_msg = e.what(); }
+        }
+    }
+    if (error_flag) throw std::invalid_argument(error_msg);
     return out;
 }
 
@@ -651,7 +818,9 @@ py::dict process(
     const std::string&              output_path,
     const std::string&              log_path,
     int                             chunk_size  = 500,
-    int                             num_threads = 0
+    int                             num_threads = 0,
+    const std::string&              checkpoint_path = "",
+    bool                            resume = false
 ) {
     if (chunk_size <= 0)
         throw std::invalid_argument("chunk_size must be > 0");
@@ -666,9 +835,29 @@ py::dict process(
 #endif
 
     Logger   log(log_path);
-    std::ofstream out_file(output_path);
+    
+    std::ios_base::openmode mode = std::ios::out;
+    if (resume) mode |= std::ios::app;
+    std::ofstream out_file(output_path, mode);
     if (!out_file.is_open())
         throw std::runtime_error("Cannot open output file: " + output_path);
+
+    std::unordered_set<int> completed_chunks;
+    if (resume && !checkpoint_path.empty()) {
+        std::ifstream cp_in(checkpoint_path);
+        int cid;
+        while (cp_in >> cid) completed_chunks.insert(cid);
+        if (!completed_chunks.empty()) {
+            log.info("Resuming: Found " + std::to_string(completed_chunks.size()) + " completed chunks in checkpoint.");
+        }
+    }
+    
+    std::ofstream cp_out;
+    if (!checkpoint_path.empty()) {
+        cp_out.open(checkpoint_path, std::ios::app);
+        if (!cp_out.is_open())
+            throw std::runtime_error("Cannot open checkpoint file: " + checkpoint_path);
+    }
 
     // ---- split into chunks ----
     struct Chunk { int id; std::vector<std::string> items; };
@@ -837,6 +1026,18 @@ Binary math on two numeric columns (0-based indices). *operation*: add/sub/mul/d
         "Filter rows where numeric column is in range [min_val, max_val].");
 
     // Core chunked processing
+    m.def("aggregate_csv_column", &aggregate_csv_column,
+        py::arg("rows"), py::arg("operation"), py::arg("col"), py::arg("skip_header") = false,
+        "Aggregate a column across all rows. *operation*: sum, product, average.");
+
+    m.def("trim_csv_rows_column", &trim_csv_rows_column,
+        py::arg("rows"), py::arg("col"), py::arg("skip_header") = false,
+        "Trim leading/trailing whitespace from a specific column across all rows.");
+
+    m.def("concat_csv_rows_columns", &concat_csv_rows_columns,
+        py::arg("rows"), py::arg("col_left"), py::arg("col_right"), py::arg("sep"), py::arg("col_out"), py::arg("skip_header") = false,
+        "Concatenate two columns with a separator across all rows.");
+
     m.def("process", &process,
         py::arg("records"),
         py::arg("transform_fn"),
@@ -844,8 +1045,10 @@ Binary math on two numeric columns (0-based indices). *operation*: add/sub/mul/d
         py::arg("log_path"),
         py::arg("chunk_size")  = 500,
         py::arg("num_threads") = 0,
+        py::arg("checkpoint_path") = "",
+        py::arg("resume") = false,
         R"doc(
-Process *records* in parallel chunks and write results to a file.
+Process *records* in chunks and write results to a file.
 
 Parameters
 ----------
@@ -854,13 +1057,17 @@ records : list[str]
 transform_fn : callable[[str], str]
     Called once per record.  Must accept a str and return a str.
 output_path : str
-    Path to the output file (overwritten if exists).
+    Path to the output file (overwritten if exists, appended if resume).
 log_path : str
     Path to the plain-text progress log (always appended to).
 chunk_size : int, optional
     Records per chunk.  Default 500.
 num_threads : int, optional
-    OpenMP thread count.  0 = let OpenMP decide (usually = CPU cores).
+    OpenMP thread count.  0 = let OpenMP decide.
+checkpoint_path : str, optional
+    Path to a checkpoint file for resuming progress.
+resume : bool, optional
+    If true, read checkpoint_path to skip already processed chunks.
 
 Returns
 -------

@@ -5,8 +5,7 @@
 Your ChunkFlow project has been enhanced with powerful row-level processing capabilities. Here's what's now available:
 
 ---
-
-## 📊 1. Extended Math Operations
+ 1. Extended Math Operations
 
 ### Basic Arithmetic (Already Existed)
 - Add, Subtract, Multiply, Divide on CSV columns

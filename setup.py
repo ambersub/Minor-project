@@ -78,7 +78,7 @@ setup(
     name="chunkflow",
     version="0.1.0",
     description="CSV row split/join and column math; optional SQLite chunking in chunkflow.chunking",
-    long_description=Path("README.md").read_text(encoding="utf-8"),
+    long_description="chunkflow C++ core extension",
     long_description_content_type="text/markdown",
     python_requires=">=3.9",
     packages=find_packages(exclude=["tests*"]),

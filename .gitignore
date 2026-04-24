@@ -29,3 +29,5 @@ output.csv
 # --- OS Specific ---
 .DS_Store
 Thumbs.db
+*.log
+*.csv
