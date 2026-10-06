@@ -14,6 +14,7 @@ For deep-dive technical references, consult the individual documentation compone
 | 📁 **File Directory** | [docs/FILE_DIRECTORY.md](docs/FILE_DIRECTORY.md) | Exhaustive directory tree and file-by-file specifications for all Python, C++, config, and test files. |
 | 🛠️ **Tech Stack** | [docs/TECH_STACK.md](docs/TECH_STACK.md) | C++17 optimization, pybind11 interop, OpenMP SIMD multi-threading, platform compilers, and dynamic flags. |
 | 📖 **Library Tutorial** | [docs/TUTORIAL.md](docs/TUTORIAL.md) | Hands-on step-by-step tutorial covering basic/extended math, delimiters, filtering, and resumable chunk pipelines. |
+| 📚 **Libraries Report** | [docs/LIBRARIES_REPORT.md](docs/LIBRARIES_REPORT.md) | Comprehensive audit of all C++ STL headers, pybind11, OpenMP, Python stdlib, build tools, & test libraries. |
 
 ---
 

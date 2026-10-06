@@ -1,6 +1,6 @@
 # 📁 ChunkFlow File Directory & Module Reference
 
-This document provides a comprehensive, file-by-file reference for every file and directory in the **ChunkFlow** codebase.
+This document provides a comprehensive, file-by-file reference for every file and directory in the **ChunkFlow** codebase, including an explicit list of **which libraries are used in each file**.
 
 ---
 
@@ -27,9 +27,10 @@ minor-project/
 │   └── test_superstore_sample_addition.py  # Integration test reading/writing physical CSV files
 │
 ├── docs/                                  # 📚 Project Documentation Suite
-│   ├── PROJECT_FLOW.md                    # In-depth architectural & execution flow documentation
+│   ├── PROJECT_FLOW.md                    # Architectural & execution flow documentation
 │   ├── FILE_DIRECTORY.md                  # Detailed directory & file reference (This document)
-│   ├── TECH_STACK.md                      # Complete technology stack & compiler breakdown
+│   ├── TECH_STACK.md                      # Technology stack & compiler breakdown
+│   ├── LIBRARIES_REPORT.md                # Comprehensive audit of all libraries used
 │   └── TUTORIAL.md                        # Step-by-step user guide & API tutorial
 │
 ├── datasetgen.py                          # Synthetic CSV dataset generator (100k / 1M records)
@@ -44,37 +45,34 @@ minor-project/
 
 ---
 
-## 📄 Exhaustive File Specifications
+## 📄 Exhaustive File Specifications & Library Usages
 
 ### 1. Python Application Package (`chunkflow/`)
 
 #### 🔹 [`chunkflow/__init__.py`](file:///c:/Users/Amber/Desktop/minor-project/chunkflow/__init__.py)
 * **Lines of Code**: ~40 lines
 * **Purpose**: Primary module initialization file defining the public API interface of `chunkflow`.
-* **Key Exports**:
-  - `split_csv_row`: Splits a single comma-separated CSV string.
-  - `join_csv_row`: Joins string lists into an RFC4180 CSV line.
-  - `apply_csv_row_math_binary` & `apply_csv_row_math_scalar`: Row-level binary/scalar arithmetic.
-  - `apply_csv_rows_math_binary` & `apply_csv_rows_math_scalar`: Batch row list arithmetic.
-  - `csv_math_backend`: String indicating the underlying engine (defaults to `"cpp"`).
-* **Dependencies**: Imports from `chunkflow.csv_math`.
+* **Libraries Used In This File**:
+  - `__future__.annotations`: PEP 563 deferred evaluation of type annotations.
+  - `chunkflow.csv_math`: Internal module re-exporting public functions.
 
 #### 🔹 [`chunkflow/csv_math.py`](file:///c:/Users/Amber/Desktop/minor-project/chunkflow/csv_math.py)
 * **Lines of Code**: ~56 lines
 * **Purpose**: Python binding layer delegating math, parsing, and filtering directly to `chunkflow_core`.
-* **Key Functions Bound**:
-  - **Parsing**: `split_csv_row`, `join_csv_row`, `split_delimited_row`, `join_delimited_row`.
-  - **Basic Arithmetic**: `apply_csv_row_math_binary`, `apply_csv_row_math_scalar`, `apply_csv_rows_math_binary`, `apply_csv_rows_math_scalar`.
-  - **Extended Arithmetic**: `apply_csv_row_math_unary`, `apply_csv_rows_math_unary`, `apply_csv_row_math_power`.
-  - **Row Filtering**: `filter_rows` (predicate), `filter_rows_by_field` (exact string match), `filter_rows_by_range` (numeric range).
-* **Dependencies**: `import chunkflow_core as _core`.
+* **Libraries Used In This File**:
+  - `__future__.annotations`: PEP 563 deferred evaluation of type annotations.
+  - `chunkflow_core` (`_core`): Native C++ extension module compiled via `pybind11` and `setuptools`. Binds `split_csv_row`, `join_csv_row`, `split_delimited_row`, `join_delimited_row`, `apply_csv_row_math_binary`, `apply_csv_row_math_scalar`, `apply_csv_rows_math_binary`, `apply_csv_rows_math_scalar`, `apply_csv_row_math_unary`, `apply_csv_rows_math_unary`, `apply_csv_row_math_power`, `filter_rows`, `filter_rows_by_field`, `filter_rows_by_range`.
 
 #### 🔹 [`chunkflow/chunking.py`](file:///c:/Users/Amber/Desktop/minor-project/chunkflow/chunking.py)
 * **Lines of Code**: ~154 lines
 * **Purpose**: Provides Python class abstractions for dataset processing with statistical metrics.
-* **Key Components**:
-  - `@dataclass class RunSummary`: Stores execution stats (`db_path`, `log_path`, `total_chunks`, `completed`, `skipped`, `failed`, `elapsed_seconds`) and calculates `success_rate`.
-  - `class ChunkProcessor`: High-level manager configuring chunk sizes (`chunk_size=500`), thread counts (`num_threads=0`), and processing callbacks via `process()`.
+* **Libraries Used In This File**:
+  - `json` (`json.dumps`, `json.loads`): Record serialization and deserialization.
+  - `sqlite3` (`sqlite3.connect`): Database queries in `read_results()`, `chunk_status()`, and `retry_failed()`.
+  - `textwrap` (`textwrap.dedent`): Formatting `RunSummary.__str__()` CLI output.
+  - `dataclasses` (`@dataclass`): Data container `RunSummary`.
+  - `typing` (`Any`, `Callable`, `Iterable`, `Optional`): Function parameter and return type hints.
+  - `chunkflow_core` (`_core.process`): Under-the-hood C++ dataset chunk processing engine.
 
 ---
 
@@ -83,15 +81,18 @@ minor-project/
 #### 🔹 [`src/chunkflow_core.cpp`](file:///c:/Users/Amber/Desktop/minor-project/src/chunkflow_core.cpp)
 * **Lines of Code**: ~1079 lines
 * **Purpose**: The main engine of ChunkFlow written in native C++17.
-* **Key Sections & Algorithms**:
-  - **CSV Parser Engine** (`split_csv_row`, `join_csv_row`, `split_delimited_row`, `join_delimited_row`): Performs character-by-character tokenization, RFC4180 quotation checks, quote escaping (`""`), and whitespace trimming (`trim_inplace`).
-  - **Double Parsing & Formatting** (`parse_double_field`, `format_double_cell`): High-precision string-to-double parsing using `std::stod` and precision formatting via `std::ostringstream`.
-  - **Math Enums & Functions** (`MathOpBinary`, `MathOpScalar`, `MathOpUnary`): Implementation of `apply_binary()`, `apply_scalar()`, `apply_unary()`, and `apply_csv_row_math_power()`.
-  - **OpenMP Parallel Kernels** (`apply_csv_rows_math_*`): `#pragma omp parallel for` multi-threaded execution across row vectors with critical section exception safety.
-  - **Filtering Engine** (`filter_rows`, `filter_rows_by_field`, `filter_rows_by_range`): Evaluates predicate lambdas via GIL acquisition or conducts fast numeric range and field checks directly in C++.
-  - **Logger Class** (`Logger`): Thread-safe file logger formatting messages with `[YYYY-MM-DD HH:MM:SS] [LEVEL]` timestamps.
-  - **Core Process Function** (`process()`): Splits input records into chunks, handles optional checkpoint resume state checking (`checkpoint_path`), releases/acquires Python GIL, and streams outputs to disk.
-  - **Pybind11 Module Definitions** (`PYBIND11_MODULE(chunkflow_core, m)`): Exposes all C++ functions directly to Python.
+* **Libraries Used In This File**:
+  - `<pybind11/pybind11.h>`, `<pybind11/functional.h>`, `<pybind11/stl.h>` (`pybind11`): Module creation (`PYBIND11_MODULE`), Python object wrappers (`py::object`, `py::str`, `py::dict`), GIL acquisition (`py::gil_scoped_acquire`), and C++/Python STL conversions.
+  - `<omp.h>` (`OpenMP`): Multi-core parallel loop execution (`#pragma omp parallel for`), critical section safety (`#pragma omp critical`), and thread management (`omp_set_num_threads`, `omp_get_max_threads`).
+  - `<cmath>` (C++ STL): Floating-point operations (`std::sqrt`, `std::fabs`, `std::floor`, `std::ceil`, `std::pow`).
+  - `<algorithm>` (C++ STL): Case lowercasing (`std::transform`, `std::tolower`) and chunk sizing (`std::min`).
+  - `<chrono>` (C++ STL): Steady clock performance timing (`steady_clock::now()`) and calendar dates (`system_clock`).
+  - `<fstream>` (C++ STL): Stream disk file I/O for `std::ofstream` and `std::ifstream`.
+  - `<mutex>` (C++ STL): Thread-safe log writing via `std::mutex` and `std::lock_guard`.
+  - `<optional>` (C++ STL): Non-throwing numeric conversion (`std::optional<double>`).
+  - `<sstream>` (C++ STL): High-precision cell formatting (`std::ostringstream`).
+  - `<vector>` & `<unordered_set>` (C++ STL): Memory array storage (`std::vector`) and $O(1)$ checkpoint chunk set (`std::unordered_set<int>`).
+  - `<stdexcept>` (C++ STL): Exception throwing (`std::invalid_argument`, `std::runtime_error`).
 
 ---
 
@@ -100,10 +101,12 @@ minor-project/
 #### 🔹 [`setup.py`](file:///c:/Users/Amber/Desktop/minor-project/setup.py)
 * **Lines of Code**: ~90 lines
 * **Purpose**: Configures pybind11 compilation flags, platform libraries, and OpenMP linking.
-* **Compiler Flags Setup**:
-  - **Windows (MinGW)**: `-O3`, `-std=c++17`, `-fopenmp`, `-DMS_WIN64`, `-D_hypot=hypot`, `-static-libgcc`, `-static-libstdc++`.
-  - **macOS**: `-O3`, `-std=c++17`, `-Xpreprocessor`, `-fopenmp`, `-lomp`.
-  - **Linux (GCC)**: `-O3`, `-std=c++17`, `-fopenmp`.
+* **Libraries Used In This File**:
+  - `setuptools` (`Extension`, `setup`, `find_packages`): Defining `chunkflow_core` C++ extension module.
+  - `pybind11` (`pybind11.get_include()`): Providing header include directories for C++ compilation.
+  - `sys`: Detecting operating system platform (`sys.platform`).
+  - `os`: Reading environment variables (`os.environ`).
+  - `pathlib.Path`: Resolving file paths.
 
 #### 🔹 [`pyproject.toml`](file:///c:/Users/Amber/Desktop/minor-project/pyproject.toml)
 * **Purpose**: PEP 517 build system configuration specifying `setuptools` and `pybind11>=2.11` as build dependencies.
@@ -116,7 +119,10 @@ minor-project/
 ### 4. Utilities & Benchmarks
 
 #### 🔹 [`datasetgen.py`](file:///c:/Users/Amber/Desktop/minor-project/datasetgen.py)
-* **Purpose**: Generates synthetic benchmark CSV datasets (`chunkflow_test_100k.csv`) containing 100,000 to 1,000,000 rows with columns: `id`, `val_float`, `val_int`, `category`, `label`.
+* **Purpose**: Generates synthetic benchmark CSV datasets (`chunkflow_test_100k.csv`) containing 100,000 to 1,000,000 rows.
+* **Libraries Used In This File**:
+  - `pandas` (`pd.DataFrame`, `df.to_csv()`): Exporting synthetic CSV dataset.
+  - `numpy` (`np.arange`, `np.random.uniform`, `np.random.randint`, `np.random.choice`): Generating float, int, category, and label arrays.
 
 #### 🔹 [`README_100k_benchmark.md`](file:///c:/Users/Amber/Desktop/minor-project/README_100k_benchmark.md)
 * **Purpose**: Documents benchmark methodology and performance comparisons demonstrating **~2.64x speedup** of ChunkFlow vs standard Python `multiprocessing`.
@@ -125,23 +131,26 @@ minor-project/
 
 ### 5. Test Harness (`tests/`)
 
-#### 🔹 [`tests/fixtures/superstore_sample.csv`](file:///c:/Users/Amber/Desktop/minor-project/tests/fixtures/superstore_sample.csv)
-* **Purpose**: Realistic 21-column Superstore CSV dataset containing string titles, dates, numbers, quotes, and commas used across unit tests.
-
 #### 🔹 [`tests/test_chunkflow_math.py`](file:///c:/Users/Amber/Desktop/minor-project/tests/test_chunkflow_math.py)
 * **Purpose**: Unit tests verifying basic binary addition, subtraction, division, scalar scaling, quoted cell preservation, and zero-division error raising.
+* **Libraries Used In This File**: `pytest` (`pytest.approx`, `pytest.raises`), `pathlib.Path`, `chunkflow.csv_math`.
 
 #### 🔹 [`tests/test_chunkflow_features.py`](file:///c:/Users/Amber/Desktop/minor-project/tests/test_chunkflow_features.py)
 * **Purpose**: Unit tests verifying batch math, column aggregation (`sum`, `average`), column concatenation, whitespace trimming, and checkpoint recovery.
+* **Libraries Used In This File**: `pytest` (`tmp_path`), `os`, `chunkflow_core`.
 
 #### 🔹 [`tests/test_dataset_threading_checkpoint.py`](file:///c:/Users/Amber/Desktop/minor-project/tests/test_dataset_threading_checkpoint.py)
 * **Purpose**: Multi-threaded integration test verifying chunk recovery when resuming an intentionally interrupted job.
+* **Libraries Used In This File**: `pytest` (`tmp_path`), `os`, `chunkflow_core`.
 
 #### 🔹 [`tests/test_superstore_sample_addition.py`](file:///c:/Users/Amber/Desktop/minor-project/tests/test_superstore_sample_addition.py)
 * **Purpose**: End-to-end file integration test reading physical CSV files, executing `chunkflow_core` transformations, and verifying resulting CSV output files.
+* **Libraries Used In This File**: `pytest` (`pytest.approx`, `pytest.raises`, `pytest.skip`), `csv` (`csv.reader`), `sys`, `io.StringIO`, `pathlib.Path`, `os` (`os.add_dll_directory`), `shutil` (`shutil.which("gcc")`), `chunkflow_core`.
 
 #### 🔹 [`tests/test_100k_chunkflow.py`](file:///c:/Users/Amber/Desktop/minor-project/tests/test_100k_chunkflow.py)
 * **Purpose**: Benchmark script timing `chunkflow_core.process()` over 100,000 CSV rows using 4 OpenMP threads.
+* **Libraries Used In This File**: `os`, `time` (`time.time()`), `chunkflow_core`.
 
 #### 🔹 [`tests/test_100k_multiprocessing.py`](file:///c:/Users/Amber/Desktop/minor-project/tests/test_100k_multiprocessing.py)
 * **Purpose**: Benchmark comparison script timing standard Python `multiprocessing.Pool` over 100,000 CSV rows.
+* **Libraries Used In This File**: `os`, `time` (`time.time()`), `multiprocessing` (`multiprocessing.Pool`).
